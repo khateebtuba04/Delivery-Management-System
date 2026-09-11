@@ -22,3 +22,6 @@ backup_*.sql
 # PHP/composer/node dependencies (if any)
 vendor/
 node_modules/
+
+.vercel
+.env*

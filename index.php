@@ -127,6 +127,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
                 <?php endif; ?>
 
+                <!-- Demo quick fill badge -->
+                <div class="alert alert-info py-2 px-3 small mb-3 border-0 rounded-3" style="background: rgba(13, 202, 240, 0.12); color: #0284c7;">
+                    <i class="fa-solid fa-circle-info me-1"></i>
+                    <strong>Demo Access:</strong> Password is <code>123</code> for all roles (Admin: <code>admin</code>, Customer: <code>customer1</code>, Driver: <code>partner1</code>)
+                </div>
+
                 <!-- Tab Navigation for the three portals -->
                 <ul class="nav nav-tabs login-tabs mb-4" id="loginTab" role="tablist">
                     <li class="nav-item" role="presentation">

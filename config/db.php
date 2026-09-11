@@ -2,18 +2,15 @@
 // config/db.php
 if (session_status() === PHP_SESSION_NONE) {
     if (getenv('VERCEL') || isset($_ENV['VERCEL'])) {
-        // Vercel serverless containers only have writable access to /tmp
         ini_set('session.save_path', '/tmp');
     }
     session_start();
 }
 
-// Database credentials: use environment variables if deployed to cloud (Vercel, Render, Railway)
-// otherwise fall back to standard local development values (XAMPP / WAMP)
-$host = getenv('DB_HOST') ?: 'localhost';
+$host = getenv('DB_HOST');
 $db   = getenv('DB_NAME') ?: 'delivery_db';
-$user = getenv('DB_USER') ?: 'root';
-$pass = getenv('DB_PASS') !== false ? getenv('DB_PASS') : (getenv('DB_PASSWORD') !== false ? getenv('DB_PASSWORD') : '');
+$user = getenv('DB_USER');
+$pass = getenv('DB_PASS') !== false ? getenv('DB_PASS') : (getenv('DB_PASSWORD') !== false ? getenv('DB_PASSWORD') : null);
 $port = getenv('DB_PORT') ?: '3306';
 $charset = 'utf8mb4';
 
@@ -23,69 +20,88 @@ $options = [
     PDO::ATTR_EMULATE_PREPARES   => false,
 ];
 
-try {
-    // 1. Try connecting directly to the target database
-    $dsn_with_db = "mysql:host=$host;port=$port;dbname=$db;charset=$charset";
-    $pdo = new PDO($dsn_with_db, $user, $pass, $options);
-} catch (\PDOException $e) {
-    // 2. If target DB doesn't exist yet, try creating it (common on local MySQL)
+$pdo = null;
+
+// 1. Try MySQL if DB_HOST is explicitly provided (or local development)
+if ($host && $host !== 'localhost' || (!getenv('VERCEL') && !isset($_ENV['VERCEL']) && $host)) {
+    $mysqlHost = $host ?: 'localhost';
+    $mysqlUser = $user ?: 'root';
+    $mysqlPass = $pass !== null ? $pass : '';
     try {
-        $dsn = "mysql:host=$host;port=$port;charset=$charset";
-        $pdo = new PDO($dsn, $user, $pass, $options);
-        $pdo->exec("CREATE DATABASE IF NOT EXISTS `$db` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
-        $pdo->exec("USE `$db`");
-    } catch (\PDOException $inner) {
-        // Output a graceful setup banner for cloud deployments instead of a harsh crash
-        ?>
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Database Setup Required - QuickShip Delivery</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-            <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-            <style>
-                body { background: #0b0f19; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1.5rem; }
-                .setup-card { background: rgba(17, 24, 39, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 2.5rem; max-width: 650px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); }
-                .code-box { background: #030712; border: 1px solid #1f2937; border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.9rem; color: #38bdf8; text-align: left; }
-            </style>
-        </head>
-        <body>
-            <div class="setup-card text-center">
-                <div class="mb-3 text-warning">
-                    <i class="fa-solid fa-triangle-exclamation fa-3x"></i>
-                </div>
-                <h3 class="fw-bold mb-2">Cloud Database Setup Required</h3>
-                <p class="text-secondary mb-4">
-                    Your Delivery Management System frontend is deployed on Vercel, but it needs a remote MySQL database to store users and deliveries.
-                </p>
-                <div class="text-start mb-4">
-                    <h6 class="text-light fw-bold mb-2"><i class="fa-solid fa-sliders me-2"></i>Add Environment Variables in Vercel Dashboard:</h6>
-                    <div class="code-box">
-                        DB_HOST = your-cloud-mysql-host<br>
-                        DB_PORT = 3306<br>
-                        DB_USER = your_database_username<br>
-                        DB_PASS = your_database_password<br>
-                        DB_NAME = delivery_db
-                    </div>
-                </div>
-                <div class="alert alert-danger text-start py-2 px-3 small">
-                    <strong>Connection Error:</strong> <?php echo htmlspecialchars($e->getMessage()); ?>
-                </div>
-                <p class="text-muted small mb-0">Free cloud MySQL providers: TiDB Cloud Serverless, Aiven, or Railway.</p>
-            </div>
-        </body>
-        </html>
-        <?php
-        exit;
+        $dsn_with_db = "mysql:host=$mysqlHost;port=$port;dbname=$db;charset=$charset";
+        $pdo = new PDO($dsn_with_db, $mysqlUser, $mysqlPass, $options);
+    } catch (\PDOException $e) {
+        try {
+            $dsn = "mysql:host=$mysqlHost;port=$port;charset=$charset";
+            $pdo = new PDO($dsn, $mysqlUser, $mysqlPass, $options);
+            $pdo->exec("CREATE DATABASE IF NOT EXISTS `$db` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+            $pdo->exec("USE `$db`");
+        } catch (\PDOException $inner) {
+            $pdo = null;
+        }
     }
 }
 
-// Auto-seed database tables if they do not exist
-try {
-    $tableCheck = $pdo->query("SHOW TABLES LIKE 'users'");
-    if ($tableCheck->rowCount() == 0) {
+// 2. Fallback to Embedded SQLite (Zero-config out of the box on Vercel)
+if (!$pdo) {
+    $sqlitePath = (getenv('VERCEL') || isset($_ENV['VERCEL'])) ? '/tmp/delivery.sqlite' : __DIR__ . '/delivery.sqlite';
+    
+    $pdo = new PDO("sqlite:" . $sqlitePath, null, null, [
+        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+
+    // Create SQLite schema
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS `users` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+          `username` TEXT UNIQUE NOT NULL,
+          `password` TEXT NOT NULL,
+          `role` TEXT DEFAULT 'Admin',
+          `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS `customers` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+          `name` TEXT NOT NULL,
+          `address` TEXT NOT NULL,
+          `customer_type` TEXT NOT NULL,
+          `contact_number` TEXT NOT NULL,
+          `username` TEXT UNIQUE NOT NULL,
+          `password` TEXT NOT NULL,
+          `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS `delivery_partners` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+          `name` TEXT NOT NULL,
+          `address` TEXT NOT NULL,
+          `contact_number` TEXT NOT NULL,
+          `username` TEXT UNIQUE NOT NULL,
+          `password` TEXT NOT NULL,
+          `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS `orders` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+          `customer_id` INTEGER NOT NULL,
+          `delivery_partner_id` INTEGER NOT NULL,
+          `order_details` TEXT NOT NULL,
+          `status` TEXT DEFAULT 'Order Preparing',
+          `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+          `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS `order_status_history` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+          `order_id` INTEGER NOT NULL,
+          `status` TEXT NOT NULL,
+          `changed_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    ");
+} else {
+    // MySQL table creation
+    try {
         $pdo->exec("
             CREATE TABLE IF NOT EXISTS `users` (
               `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -136,18 +152,40 @@ try {
               FOREIGN KEY (`order_id`) REFERENCES `orders`(`id`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         ");
-    }
+    } catch (\Exception $ex) {}
+}
 
-    // Auto-seed default admin if users table is empty
-    $stmt = $pdo->query("SELECT COUNT(*) FROM `users`");
-    $count = $stmt->fetchColumn();
+// 3. Auto-seed default accounts and demo data if database is fresh
+try {
+    $count = $pdo->query("SELECT COUNT(*) FROM `users`")->fetchColumn();
     if ($count == 0) {
-        $admin_user = 'admin';
+        // Seed default Admin (admin / 123)
         $admin_pass = password_hash('123', PASSWORD_DEFAULT);
-        $stmtInsert = $pdo->prepare("INSERT INTO `users` (username, password, role) VALUES (?, ?, 'Admin')");
-        $stmtInsert->execute([$admin_user, $admin_pass]);
+        $stmt = $pdo->prepare("INSERT INTO `users` (`username`, `password`, `role`) VALUES (?, ?, 'Admin')");
+        $stmt->execute(['admin', $admin_pass]);
+        
+        // Seed demo Customer (customer1 / 123)
+        $cust_pass = password_hash('123', PASSWORD_DEFAULT);
+        $stmtCust = $pdo->prepare("INSERT INTO `customers` (`name`, `address`, `customer_type`, `contact_number`, `username`, `password`) VALUES (?, ?, ?, ?, ?, ?)");
+        $stmtCust->execute(['John Doe', '123 Baker Street, Downtown', 'Food', '+1 555-0199', 'customer1', $cust_pass]);
+        $custId = $pdo->lastInsertId();
+        
+        // Seed demo Delivery Partner (partner1 / 123)
+        $part_pass = password_hash('123', PASSWORD_DEFAULT);
+        $stmtPart = $pdo->prepare("INSERT INTO `delivery_partners` (`name`, `address`, `contact_number`, `username`, `password`) VALUES (?, ?, ?, ?, ?)");
+        $stmtPart->execute(['Alex Rider', '45 Speed Avenue, Metro', '+1 555-0188', 'partner1', $part_pass]);
+        $partId = $pdo->lastInsertId();
+        
+        // Seed demo Order
+        $stmtOrd = $pdo->prepare("INSERT INTO `orders` (`customer_id`, `delivery_partner_id`, `order_details`, `status`) VALUES (?, ?, ?, ?)");
+        $stmtOrd->execute([$custId, $partId, '2x Gourmet Meal Combo, 1x Fresh Juice', 'Order Preparing']);
+        $ordId = $pdo->lastInsertId();
+        
+        // Seed demo Order History
+        $stmtHist = $pdo->prepare("INSERT INTO `order_status_history` (`order_id`, `status`) VALUES (?, ?)");
+        $stmtHist->execute([$ordId, 'Order Preparing']);
     }
 } catch (\Exception $ex) {
-    // If auto-schema fails due to restricted privileges, continue gracefully
+    // If already seeded or table exists
 }
 ?>
